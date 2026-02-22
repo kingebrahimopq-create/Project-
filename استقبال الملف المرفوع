@@ -1,0 +1,6 @@
+<?php
+$name = $_GET['name'] ?? 'file.bin';
+$data = file_get_contents('php://input');
+file_put_contents('uploads/' . $name, $data);
+echo "OK";
+?>
