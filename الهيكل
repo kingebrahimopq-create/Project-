@@ -1,0 +1,14 @@
+RemoteGuardian/           (اسم المشروع الرئيسي)
+├── app/                  (مجلد الوحدة الرئيسية)
+│   ├── src/              (الملفات المصدرية)
+│   │   └── main/         (المصدر الرئيسي)
+│   │       ├── java/com/remote/guardian/   (ملفات Kotlin)
+│   │       ├── res/                          (ملفات الواجهة)
+│   │       └── AndroidManifest.xml
+│   ├── build.gradle      (ملف بناء الوحدة)
+│   └── ... (ملفات أخرى)
+├── gradle/                (ملفات Gradle Wrapper)
+├── build.gradle           (ملف بناء المشروع الرئيسي)
+├── settings.gradle
+├── gradle.properties
+└── local.properties        (سيتم إنشاؤه محلياً)
