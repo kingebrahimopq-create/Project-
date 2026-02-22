@@ -1,0 +1,8 @@
+<?php
+if (isset($_GET['set'])) {
+    file_put_contents('cmd.txt', $_GET['set']);
+    echo "OK";
+} else {
+    echo file_get_contents('cmd.txt');
+}
+?>
